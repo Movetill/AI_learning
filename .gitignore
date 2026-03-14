@@ -1,0 +1,6 @@
+﻿data/
+MNIST/
+__pycache__/
+*.pyc
+.conda/
+*.pth
