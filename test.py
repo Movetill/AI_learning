@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt#画图工具，最后显示手写数字图片和
 import os#设置环境变量操作
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"#保证如果OpenMP(Open Muti-Processing，多线程并行操作，让程序高效利用多核CPU的并行工具)运行库重复时，也允许执行(影响当前Python进程)
 #"KMP_DUPLICATE_LIB_OK": "KMP"：Intel OpenMP相关前缀; "DUPLICATE":重复; "LIB":库; "OK":允许
+import random
+def set_seed(seed=42):
+    random.seed(seed)
+    torch.manual_seed(seed)
 
 class Net(torch.nn.Module):#定义Net的神经网络类，继承Pytorch的nn.Moudle，确保Pytorch知道模型层数和训练参数
 
@@ -23,50 +27,129 @@ class Net(torch.nn.Module):#定义Net的神经网络类，继承Pytorch的nn.Mou
         x = torch.nn.functional.log_softmax(self.fc4(x), dim=1)#利用log_softmax变成概率分布并取对(与后面损失函数torch.nn.functional_loss对应)
         return x
 
+from torch.utils.data import DataLoader , random_split
+from torchvision.datasets import MNIST
+from torchvision import transforms
 
-def get_data_loader(is_train):#拿到数据集并包装成Dateloader
+def get_data_loaders(batch_size=64):#拿到数据集并包装成Dateloader
     to_tensor = transforms.Compose([transforms.ToTensor()])#数据预处理，将图片从PIL图像或者numpy数组转换成Pytorch张量，同时将像素值从0~255缩放成0~1
-    data_set = MNIST("", is_train, transform=to_tensor, download=True)
-    return DataLoader(data_set, batch_size=15, shuffle=True)
+    
+    full_train_set=MNIST("data",train=True,transform=to_tensor,download=True)
+    test_set = MNIST("data",train=False,transform=to_tensor,download=True)
 
+    train_size=int(0.9*len(full_train_set))
+    val_size=len(full_train_set)-train_size
 
-def evaluate(test_data, net):
-    n_correct = 0
-    n_total = 0
+    train_set,val_set=random_split(full_train_set,[train_size,val_size])
+
+    train_loader=DataLoader(train_set,batch_size=batch_size,shuffle=True)
+    val_loader=DataLoader(val_set,batch_size=batch_size,shuffle=False)
+    test_loader=DataLoader(test_set,batch_size=batch_size,shuffle=False)
+
+    return train_loader,val_loader,test_loader
+
+def evaluate(loader, net):
+    net.eval()
+    total_loss=0.0
+    correct = 0
+    total = 0
+
     with torch.no_grad():
-        for (x, y) in test_data:
-            outputs = net.forward(x.view(-1, 28*28))
-            for i, output in enumerate(outputs):
-                if torch.argmax(output) == y[i]:
-                    n_correct += 1
-                n_total += 1
-    return n_correct / n_total
+        for x, y in loader:
+            x=x.view(x.size(0),-1)
+            output = net(x)
+            loss=torch.nn.functional.nll_loss(output,y)
 
+            total_loss +=loss.item()*x.size(0)
+            pred = output.argmax(dim=1)
+            correct+=(pred == y).sum().item()
+            total +=x.size(0)
 
+    avg_loss = total_loss / total
+    acc = correct / total
+    return avg_loss,acc
+
+def train_one_epoch(loader,net,optimizer):
+    net.train()
+    total_loss = 0.0
+    total_samples = 0
+
+    for x,y in loader:
+        x=x.view(x.size(0),-1)
+
+        optimizer.zero_grad()
+        output = net(x)
+        loss = torch.nn.functional.nll_loss(output,y)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()*x.size(0)
+        total_samples += x.size(0)
+
+    return total_loss/total_samples
 def main():
+    set_seed(42)
 
-    train_data = get_data_loader(is_train=True)
-    test_data = get_data_loader(is_train=False)
+    train_data,val_data,test_data = get_data_loaders(batch_size=64)
     net = Net()
     
-    print("initial accuracy:", evaluate(test_data, net))
-    optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
-    for epoch in range(5):
-        for (x, y) in train_data:
-            net.zero_grad()
-            output = net.forward(x.view(-1, 28*28))
-            loss = torch.nn.functional.nll_loss(output, y)
-            loss.backward()
-            optimizer.step()
-        print("epoch", epoch, "accuracy:", evaluate(test_data, net))
+    initial_val_loss,initial_val_acc = evaluate(val_data,net)
+    print(f"initial validation loss: {initial_val_loss:.4f}")
+    print(f"initial validation accuracy: {initial_val_acc:.4f}")
 
-    for (n, (x, _)) in enumerate(test_data):
-        if n > 3:
-            break
-        predict = torch.argmax(net.forward(x[0].view(-1, 28*28)))
-        plt.figure(n)
-        plt.imshow(x[0].view(28, 28))
-        plt.title("prediction: " + str(int(predict)))
+    optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
+
+    train_losses = []
+    val_losses = []
+    val_accs = []
+    best_val_acc = 0.0
+    
+    for epoch in range(5):
+        train_loss = train_one_epoch(train_data,net,optimizer)
+        val_loss,val_acc = evaluate(val_data,net)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
+
+        if val_acc>best_val_acc:
+            best_val_acc = val_acc
+            torch.save(net.state_dict(),"best_mnist_mlp.pth")
+            print("Best model saved.")
+
+        print(f"Epoch {epoch+1}:train+loss={train_loss:.4f},val_loss={val_loss:.4f},val_acc={val_acc:.4f}")
+
+    net.load_state_dict(torch.load("best_mnist_mlp.pth",weights_only=True))
+    net.eval()
+
+    test_loss,test_acc = evaluate(test_data,net)
+    print(f"final test loss: {test_loss:.4f}")
+    print(f"final test accuracy:{test_acc:.4f}")
+
+    net.eval()
+    with torch.no_grad():
+        for (n, (x, _)) in enumerate(test_data):
+            if n > 3:
+                break
+            predict = torch.argmax(net(x[0].view(-1, 28*28)))
+
+            plt.figure(n)
+            plt.imshow(x[0].view(28, 28))
+            plt.title("prediction: " + str(int(predict.item())))
+    plt.show()
+    plt.figure(figsize=(10,4))
+
+    plt.subplot(1,2,1)
+    plt.plot(train_losses,label="train loss")
+    plt.plot(val_losses,label="val loss")
+    plt.legend()
+    plt.title("Loss Curve")
+
+    plt.subplot(1,2,2)
+    plt.plot(val_accs,label="val accuracy")
+    plt.legend()
+    plt.title("Validation Accuracy")
+
     plt.show()
 
 
